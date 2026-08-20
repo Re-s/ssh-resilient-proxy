@@ -90,17 +90,7 @@ jobs:
           PKG="dist/srp_0.1.0_${ARCH}"
           mkdir -p "$PKG/DEBIAN" "$PKG/usr/bin" "$PKG/usr/share/doc/srp" \
                    "$PKG/lib/systemd/system" "$PKG/etc/default"
-          cat > "$PKG/DEBIAN/control" <<EOF
-          Package: srp
-          Version: 0.1.0
-          Architecture: ${ARCH}
-          Depends: libc6 (>= 2.38), systemd
-          Maintainer: wakmemlody <dev@agent.local>
-          Description: SSH resilient proxy
-           SOCKS5/HTTP CONNECT proxy over SSH with automatic
-           reconnection, keepalive, and optional byte-level
-           resume via a remote helper binary.
-          EOF
+          printf 'Package: srp\nVersion: 0.1.0\nArchitecture: %s\nDepends: libc6 (>= 2.38), systemd\nMaintainer: wakmemlody <dev@agent.local>\nDescription: SSH resilient proxy\n SOCKS5/HTTP CONNECT proxy over SSH with automatic\n reconnection, keepalive, and optional byte-level\n resume via a remote helper binary.\n' "$ARCH" > "$PKG/DEBIAN/control"
           cp target/${{ matrix.target }}/release/srp "$PKG/usr/bin/"
           cp target/${{ matrix.target }}/release/srp-helper "$PKG/usr/bin/"
           chmod 755 "$PKG/usr/bin/srp" "$PKG/usr/bin/srp-helper"
