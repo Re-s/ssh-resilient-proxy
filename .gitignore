@@ -1,0 +1,9 @@
+/target
+/.toolchain
+/.scratch
+/.cross-aarch64
+/.cross-debs
+/.build-scratch
+/dist
+*.log
+Cargo.lock.bak

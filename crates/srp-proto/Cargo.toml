@@ -1,0 +1,12 @@
+[package]
+name = "srp-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true

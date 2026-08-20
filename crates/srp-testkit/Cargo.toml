@@ -1,0 +1,19 @@
+[package]
+name = "srp-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "srp_testkit"
+path = "src/lib.rs"
+
+[dependencies]
+russh.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+socket2.workspace = true

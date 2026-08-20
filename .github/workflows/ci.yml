@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-lint-${{ hashFiles('**/Cargo.lock') }}
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock') }}
+      - run: cargo test --workspace
+      - run: cargo test --workspace -- --test-threads 1
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: amd64
+            cc: ""
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
+            cc: gcc-aarch64-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: matrix.cc != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.cc }} libc6-dev-arm64-cross
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-build-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build release binaries
+        run: |
+          ENV=""
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            ENV="CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc"
+          fi
+          env $ENV cargo build --release --target ${{ matrix.target }} -p srp -p srp-helper
+      - name: Verify binaries
+        run: |
+          file target/${{ matrix.target }}/release/srp
+          file target/${{ matrix.target }}/release/srp-helper
+      - name: Package deb
+        run: |
+          ARCH="${{ matrix.arch }}"
+          PKG="dist/srp_0.1.0_${ARCH}"
+          mkdir -p "$PKG/DEBIAN" "$PKG/usr/bin" "$PKG/usr/share/doc/srp" \
+                   "$PKG/lib/systemd/system" "$PKG/etc/default"
+          cat > "$PKG/DEBIAN/control" <<EOF
+          Package: srp
+          Version: 0.1.0
+          Architecture: ${ARCH}
+          Depends: libc6 (>= 2.38), systemd
+          Maintainer: wakmemlody <dev@agent.local>
+          Description: SSH resilient proxy
+           SOCKS5/HTTP CONNECT proxy over SSH with automatic
+           reconnection, keepalive, and optional byte-level
+           resume via a remote helper binary.
+          EOF
+          cp target/${{ matrix.target }}/release/srp "$PKG/usr/bin/"
+          cp target/${{ matrix.target }}/release/srp-helper "$PKG/usr/bin/"
+          chmod 755 "$PKG/usr/bin/srp" "$PKG/usr/bin/srp-helper"
+          cp dist/srp.service "$PKG/lib/systemd/system/srp.service"
+          cp dist/srp.default "$PKG/etc/default/srp"
+          cp README.md LICENSE "$PKG/usr/share/doc/srp/"
+          dpkg-deb --build "$PKG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: srp-${{ matrix.arch }}
+          path: dist/srp_0.1.0_${{ matrix.arch }}.deb
+
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/srp-*/srp_0.1.0_amd64.deb
+            dist/srp-*/srp_0.1.0_arm64.deb

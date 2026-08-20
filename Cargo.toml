@@ -1,0 +1,41 @@
+[workspace]
+members = ["crates/srp-proto", "crates/srp", "crates/srp-helper", "crates/srp-testkit"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.dependencies]
+russh = "0.62.7"
+# io-std 是 srp-helper 必需的：它的协议帧跑在 stdin/stdout 上，
+# 由 sshd 通过 SSH session 通道桥接。
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "io-util", "io-std", "sync", "time", "macros", "signal", "process"] }
+tokio-util = { version = "0.7.19", features = ["compat"] }
+bytes = "1.12.1"
+thiserror = "2.0.20"
+anyhow = "1.0.104"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.4"
+clap = { version = "4.6.6", features = ["derive", "env"] }
+rand = "0.9.5"
+async-trait = "0.1.92"
+socket2 = "0.6.5"
+futures = "0.3.34"
+hex = "0.4.3"
+blake3 = "1.8.7"
+base64 = "0.23.1"
+humantime-serde = "1.1.1"
+tempfile = "3.27.0"
+
+[profile.release]
+# 代理是长时间运行的转发进程，吞吐比编译时间重要。
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+# panic 不 abort：单条连接的 task panic 不该带走整个代理进程。
+panic = "unwind"

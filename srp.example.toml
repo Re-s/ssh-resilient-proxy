@@ -1,0 +1,48 @@
+# srp 配置示例
+
+# 转发模式：
+#   direct_tcpip（默认）—— 只用标准 SSH 通道，远端零依赖。
+#   helper          —— 在远端运行 srp-helper，获得字节级续传。
+mode = "direct_tcpip"
+
+[ssh]
+host = "gateway.example.com"
+port = 22
+user = "alice"
+
+# 认证：public_key / password / agent 三者之一
+auth = { type = "public_key", path = "/home/alice/.ssh/id_ed25519" }
+# auth = { type = "agent" }
+# auth = { type = "password", password = "..." }
+
+# 主机密钥策略。strict 表示必须已在 known_hosts 中；
+# 也可以写成 { Pinned = "SHA256:..." } 固定指纹（容器环境推荐）。
+host_key = "strict"
+
+# 保持连接：主动保活让死链在数十秒内暴露，而不是等请求失败才发现。
+keepalive_interval = "15s"
+keepalive_max = 3
+connect_timeout = "20s"
+
+[listen]
+socks5 = "127.0.0.1:1080"
+# http = "127.0.0.1:8080"
+# 监听非回环地址时必须设置凭据，否则等于开放代理。
+# username = "proxyuser"
+# password = "proxypass"
+
+[reconnect]
+enabled = true
+initial_delay = "250ms"
+max_delay = "30s"
+multiplier = 2.0
+jitter = 0.2
+# 断网期间新请求最多等待这么久，等隧道恢复后继续，而不是立刻报错。
+dial_wait = "30s"
+
+[helper]
+remote_path = "srp-helper"
+# 每条流的重传缓冲：直接决定断线可恢复的数据量。
+stream_window = 4194304
+# 远端允许连接的目标白名单，留空表示不限制。
+allow = []
