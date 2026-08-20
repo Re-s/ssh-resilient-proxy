@@ -4,6 +4,6 @@
 /.cross-aarch64
 /.cross-debs
 /.build-scratch
-/dist
+/dist/*.deb
 *.log
 Cargo.lock.bak

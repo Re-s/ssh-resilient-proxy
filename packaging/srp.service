@@ -1,0 +1,25 @@
+[Unit]
+Description=SSH Resilient Proxy
+Documentation=https://github.com/master/ssh-resilient-proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/srp
+ExecStart=/usr/bin/srp ${SRP_ARGS}
+Restart=on-failure
+RestartSec=5
+# 限制单任务 panic 不影响主进程；日志走 journal。
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=srp
+# 安全加固。
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=/etc/default/srp
+
+[Install]
+WantedBy=multi-user.target
