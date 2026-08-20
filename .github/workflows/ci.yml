@@ -77,7 +77,7 @@ jobs:
         run: |
           ENV=""
           if [ "${{ matrix.arch }}" = "arm64" ]; then
-            ENV="CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc"
+            ENV="CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc"
           fi
           env $ENV cargo build --release --target ${{ matrix.target }} -p srp -p srp-helper
       - name: Verify binaries
