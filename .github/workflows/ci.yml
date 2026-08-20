@@ -41,6 +41,7 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock') }}
+      - run: cargo build --workspace
       - run: cargo test --workspace
       - run: cargo test --workspace -- --test-threads 1
 
