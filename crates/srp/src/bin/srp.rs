@@ -40,6 +40,8 @@ enum Command {
     Check,
     /// 打印一份带注释的示例配置。
     Example,
+    /// 自动检测 SSH 配置并写入 /etc/default/srp（需要 root 权限）。
+    Setup,
 }
 
 #[derive(Parser, Debug, Default)]
@@ -132,40 +134,44 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(&cli.log_level);
 
-    if let Some(Command::Example) = cli.command {
-        print!("{}", EXAMPLE_CONFIG);
-        return Ok(());
+    match &cli.command {
+        Some(Command::Example) => {
+            print!("{}", EXAMPLE_CONFIG);
+            return Ok(());
+        }
+        Some(Command::Setup) => return run_setup(),
+        Some(Command::Check) => {
+            let cfg = build_config(&cli)?;
+            println!("✓ configuration is valid.");
+            println!(
+                "  ssh          : {}@{}:{}",
+                cfg.ssh.user, cfg.ssh.host, cfg.ssh.port
+            );
+            println!(
+                "  auth         : {}",
+                match &cfg.ssh.auth {
+                    AuthMethod::PublicKey { path, .. } => {
+                        format!("publickey {}", path.display())
+                    }
+                    AuthMethod::Password { .. } => "password".into(),
+                    AuthMethod::Agent => "ssh-agent".into(),
+                }
+            );
+            println!("  mode         : {:?}", cfg.mode);
+            println!("  host key     : {:?}", cfg.ssh.host_key);
+            println!("  socks5       : {:?}", cfg.listen.socks5);
+            println!("  http         : {:?}", cfg.listen.http);
+            println!("  keepalive    : {:?}", cfg.ssh.keepalive_interval);
+            println!("  dial wait    : {:?}", cfg.reconnect.dial_wait);
+            for w in cfg.security_warnings() {
+                println!("  ⚠ warning    : {w}");
+            }
+            return Ok(());
+        }
+        None => {}
     }
 
     let cfg = build_config(&cli)?;
-
-    if let Some(Command::Check) = cli.command {
-        println!("✓ configuration is valid.");
-        println!(
-            "  ssh          : {}@{}:{}",
-            cfg.ssh.user, cfg.ssh.host, cfg.ssh.port
-        );
-        println!(
-            "  auth         : {}",
-            match &cfg.ssh.auth {
-                AuthMethod::PublicKey { path, .. } => {
-                    format!("publickey {}", path.display())
-                }
-                AuthMethod::Password { .. } => "password".into(),
-                AuthMethod::Agent => "ssh-agent".into(),
-            }
-        );
-        println!("  mode         : {:?}", cfg.mode);
-        println!("  host key     : {:?}", cfg.ssh.host_key);
-        println!("  socks5       : {:?}", cfg.listen.socks5);
-        println!("  http         : {:?}", cfg.listen.http);
-        println!("  keepalive    : {:?}", cfg.ssh.keepalive_interval);
-        println!("  dial wait    : {:?}", cfg.reconnect.dial_wait);
-        for w in cfg.security_warnings() {
-            println!("  ⚠ warning    : {w}");
-        }
-        return Ok(());
-    }
 
     // 运行时按需构造，避免在 --check / --example 路径上启动线程池。
     tokio::runtime::Builder::new_multi_thread()
@@ -185,6 +191,215 @@ fn init_tracing(level: &str) {
         .init();
 }
 
+/// 从 `~/.ssh/config` 中提取 Host 条目，作为可能的 SSH 目标。
+///
+/// 只提取有 HostName 的条目（跳过 * 通配符），
+/// 格式为 `User@HostName:Port` 或 `User@HostName`。
+fn discover_ssh_hosts() -> Vec<String> {
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    let config_path = std::path::PathBuf::from(home).join(".ssh/config");
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+
+    let mut hosts = Vec::new();
+    let mut current_host: Option<String> = None;
+    let mut hostname: Option<String> = None;
+    let mut user: Option<String> = None;
+    let mut port: Option<String> = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            // 块结束，提交当前条目。
+            if let (Some(h), Some(hn)) = (&current_host, &hostname) {
+                if h != "*" && !hn.is_empty() {
+                    let u = user.as_deref().unwrap_or("root");
+                    let p = port.as_deref().unwrap_or("22");
+                    let target = if p == "22" {
+                        format!("{u}@{hn}")
+                    } else {
+                        format!("{u}@{hn}:{p}")
+                    };
+                    hosts.push(target);
+                }
+            }
+            current_host = None;
+            hostname = None;
+            user = None;
+            port = None;
+            continue;
+        }
+
+        let parts: Vec<&str> = trimmed.splitn(2, |c: char| c.is_whitespace()).collect();
+        let key = parts[0].to_lowercase();
+        let val = parts.get(1).unwrap_or(&"").trim();
+
+        match key.as_str() {
+            "host" => {
+                // 提交上一个条目。
+                if let (Some(h), Some(hn)) = (&current_host, &hostname) {
+                    if h != "*" && !hn.is_empty() {
+                        let u = user.as_deref().unwrap_or("root");
+                        let p = port.as_deref().unwrap_or("22");
+                        let target = if p == "22" {
+                            format!("{u}@{hn}")
+                        } else {
+                            format!("{u}@{hn}:{p}")
+                        };
+                        hosts.push(target);
+                    }
+                }
+                current_host = Some(val.to_string());
+                hostname = None;
+                user = None;
+                port = None;
+            }
+            "hostname" => hostname = Some(val.to_string()),
+            "user" => user = Some(val.to_string()),
+            "port" => port = Some(val.to_string()),
+            _ => {}
+        }
+    }
+
+    // 提交最后一个条目。
+    if let (Some(h), Some(hn)) = (&current_host, &hostname) {
+        if h != "*" && !hn.is_empty() {
+            let u = user.as_deref().unwrap_or("root");
+            let p = port.as_deref().unwrap_or("22");
+            let target = if p == "22" {
+                format!("{u}@{hn}")
+            } else {
+                format!("{u}@{hn}:{p}")
+            };
+            hosts.push(target);
+        }
+    }
+
+    hosts
+}
+
+/// 交互式配置：检测 SSH 配置，让用户选择目标，写入 /etc/default/srp。
+fn run_setup() -> Result<()> {
+    use std::io::{self, Write};
+
+    println!("🔧 srp 交互式配置");
+    println!();
+
+    // 检测 SSH 配置。
+    let hosts = discover_ssh_hosts();
+    if !hosts.is_empty() {
+        println!("检测到 ~/.ssh/config 中的主机：");
+        for (i, h) in hosts.iter().enumerate() {
+            println!("  [{}] {}", i + 1, h);
+        }
+        println!("  [0] 手动输入");
+        println!();
+
+        print!("请选择编号（或直接输入目标）：");
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+
+        let target = if input == "0" || input.is_empty() {
+            print!("SSH 目标（user@host:port）：");
+            io::stdout().flush()?;
+            let mut t = String::new();
+            io::stdin().read_line(&mut t)?;
+            t.trim().to_string()
+        } else if let Ok(idx) = input.parse::<usize>() {
+            if idx >= 1 && idx <= hosts.len() {
+                hosts[idx - 1].clone()
+            } else {
+                anyhow::bail!("无效编号: {input}");
+            }
+        } else {
+            // 直接输入的目标。
+            input.to_string()
+        };
+
+        if target.is_empty() {
+            anyhow::bail!("目标不能为空");
+        }
+
+        // 验证目标格式。
+        let _ = parse_target(&target)
+            .context("目标格式无效，应为 user@host[:port]")?;
+
+        // 写入配置。
+        let default_path = "/etc/default/srp";
+        let content = format!(
+            "# /etc/default/srp — 由 srp setup 自动生成\n\
+             SRP_ARGS={}\n",
+            target
+        );
+
+        match std::fs::write(default_path, &content) {
+            Ok(()) => {
+                println!();
+                println!("✓ 已写入 {default_path}");
+                println!();
+                println!("接下来：");
+                println!("  sudo systemctl daemon-reload");
+                println!("  sudo systemctl restart srp");
+                println!("  systemctl status srp");
+            }
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                println!();
+                println!("⚠ 权限不足，请手动执行：");
+                println!();
+                println!("  echo 'SRP_ARGS={target}' | sudo tee {default_path}");
+                println!("  sudo systemctl daemon-reload");
+                println!("  sudo systemctl restart srp");
+            }
+            Err(e) => return Err(e.into()),
+        }
+    } else {
+        println!("未检测到 ~/.ssh/config。");
+        println!();
+        print!("SSH 目标（user@host:port）：");
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let target = input.trim();
+
+        if target.is_empty() {
+            anyhow::bail!("目标不能为空");
+        }
+
+        let _ = parse_target(target)
+            .context("目标格式无效，应为 user@host[:port]")?;
+
+        let default_path = "/etc/default/srp";
+        let content = format!("# /etc/default/srp\nSRP_ARGS={}\n", target);
+
+        match std::fs::write(default_path, &content) {
+            Ok(()) => {
+                println!();
+                println!("✓ 已写入 {default_path}");
+                println!();
+                println!("接下来：");
+                println!("  sudo systemctl daemon-reload");
+                println!("  sudo systemctl restart srp");
+                println!("  systemctl status srp");
+            }
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                println!();
+                println!("⚠ 权限不足，请手动执行：");
+                println!();
+                println!("  echo 'SRP_ARGS={target}' | sudo tee {default_path}");
+                println!("  sudo systemctl daemon-reload");
+                println!("  sudo systemctl restart srp");
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    Ok(())
+}
+
 fn build_config(cli: &Cli) -> Result<Config> {
     if let Some(path) = &cli.config {
         return Config::load(path).context("failed to load configuration file");
@@ -194,15 +409,14 @@ fn build_config(cli: &Cli) -> Result<Config> {
     let target = a.target.as_deref().context(
         "未指定 SSH 目标。\n\
              \n\
-             用法：srp USER@HOST[:PORT]\n\
+             快速开始：\n\
+               srp root@10.0.0.1\n\
+               srp alice@gateway --helper\n\
              \n\
-             示例：\n\
-               srp alice@gateway.example.com          # 用自动发现的私钥连接\n\
-               srp root@10.0.0.1 --socks5 0.0.0.0:1080\n\
-               srp deploy@server --helper --allow '*.internal'\n\
+             交互式配置（自动检测 ~/.ssh/config）：\n\
+               srp setup\n\
              \n\
-             更多选项：srp --help\n\
-             配置文件：srp example > srp.toml && srp --config srp.toml",
+             完整示例：srp example > srp.toml && srp --config srp.toml",
     )?;
     let (user, host, port) = parse_target(target)?;
 
