@@ -8,6 +8,13 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=/etc/default/srp
 
+# systemd 不像登录 shell 那样设置 HOME，但 srp 靠 HOME 定位 ~/.ssh/ 下
+# 的私钥与 known_hosts。不设的话 discover_default_identity() 会静默失效，
+# 导致认证回退到 ssh-agent，而服务进程里通常没有 agent。
+# 注意：如果你通过 systemctl edit 设置了 User=youruser，
+# 同时也要设 Environment=HOME=/home/youruser。
+Environment=HOME=/root
+
 # 注意是 $SRP_ARGS 而不是 ${SRP_ARGS}：
 # systemd 只对不带花括号的形式做空白拆分（并尊重引号），
 # ${...} 会被当作单个参数整体传入。见 man systemd.service "Command lines"。

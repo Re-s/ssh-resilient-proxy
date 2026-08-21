@@ -749,7 +749,21 @@ fn expand_tilde(path: &std::path::Path) -> Result<PathBuf> {
 /// 不探测 `.pub`，也不递归扫描目录：前者不是私钥，后者既慢又可能误选密钥。
 /// 用户要选择非标准密钥时仍显式传 `--identity`，这比猜测安全。
 fn discover_default_identity() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
+    let home = std::env::var_os("HOME").or_else(|| {
+        // systemd 服务默认不设 HOME；通过 /etc/passwd 推断当前用户的家目录。
+        let uid = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata("/proc/self").ok()?);
+        let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+        for line in passwd.lines() {
+            let parts: Vec<&str> = line.split(':').collect();
+            if parts.len() >= 6 {
+                let file_uid: u32 = parts[2].parse().ok()?;
+                if file_uid == uid {
+                    return Some(std::ffi::OsString::from(parts[5]));
+                }
+            }
+        }
+        None
+    })?;
     let ssh = PathBuf::from(home).join(".ssh");
     ["id_ed25519", "id_ecdsa", "id_rsa", "id_dsa"]
         .into_iter()

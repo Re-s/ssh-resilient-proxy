@@ -105,6 +105,9 @@ jobs:
           mkdir -p "$PKG/DEBIAN" "$PKG/usr/bin" "$PKG/usr/share/doc/srp" \
                    "$PKG/lib/systemd/system" "$PKG/etc/default"
           printf 'Package: srp\nVersion: %s\nArchitecture: %s\nDepends: libc6 (>= 2.38), systemd\nMaintainer: wakmemlody <dev@agent.local>\nDescription: SSH resilient proxy\n SOCKS5/HTTP CONNECT proxy over SSH with automatic\n reconnection, keepalive, and optional byte-level\n resume via a remote helper binary.\n' "$VER" "$ARCH" > "$PKG/DEBIAN/control"
+          # 声明 conffiles：dpkg 在覆盖用户已修改的配置前会提示，
+          # 避免升级时静默丢失 SRP_ARGS。
+          cp packaging/srp.conffiles "$PKG/DEBIAN/conffiles"
           cp target/${{ matrix.target }}/release/srp "$PKG/usr/bin/"
           cp target/${{ matrix.target }}/release/srp-helper "$PKG/usr/bin/"
           chmod 755 "$PKG/usr/bin/srp" "$PKG/usr/bin/srp-helper"
