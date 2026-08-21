@@ -103,9 +103,57 @@ jobs:
           name: srp-${{ matrix.arch }}
           path: dist/srp_0.1.0_${{ matrix.arch }}.deb
 
+  build-windows:
+    runs-on: windows-latest
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: amd64
+          - target: aarch64-pc-windows-msvc
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-build-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install ARM64 MSVC tools
+        if: matrix.arch == 'arm64'
+        run: |
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" modify --installPath "C:\Program Files\Microsoft Visual Studio\2022\Enterprise" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --quiet --wait 2>$null
+          echo "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC\*\bin\Hostx64\arm64" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - name: Build release binaries
+        run: cargo build --release --target ${{ matrix.target }} -p srp -p srp-helper
+      - name: Verify binaries
+        run: |
+          Get-Item target/${{ matrix.target }}/release/srp.exe | Select-Object Name, Length
+          Get-Item target/${{ matrix.target }}/release/srp-helper.exe | Select-Object Name, Length
+      - name: Package zip
+        run: |
+          $ARCH = "${{ matrix.arch }}"
+          $PKG = "dist/srp_0.1.0_windows_${ARCH}"
+          New-Item -ItemType Directory -Force -Path "$PKG"
+          Copy-Item "target/${{ matrix.target }}/release/srp.exe" "$PKG/"
+          Copy-Item "target/${{ matrix.target }}/release/srp-helper.exe" "$PKG/"
+          Copy-Item "README.md" "$PKG/"
+          Copy-Item "LICENSE" "$PKG/"
+          Compress-Archive -Path "$PKG/*" -DestinationPath "dist/srp_0.1.0_windows_${ARCH}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: srp-windows-${{ matrix.arch }}
+          path: dist/srp_0.1.0_windows_${{ matrix.arch }}.zip
+
   release:
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, build-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
@@ -121,3 +169,5 @@ jobs:
           files: |
             dist/srp-*/srp_0.1.0_amd64.deb
             dist/srp-*/srp_0.1.0_arm64.deb
+            dist/srp-windows-*/srp_0.1.0_windows_amd64.zip
+            dist/srp-windows-*/srp_0.1.0_windows_arm64.zip
