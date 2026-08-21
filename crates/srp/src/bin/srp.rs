@@ -751,14 +751,20 @@ fn expand_tilde(path: &std::path::Path) -> Result<PathBuf> {
 fn discover_default_identity() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").or_else(|| {
         // systemd 服务默认不设 HOME；通过 /etc/passwd 推断当前用户的家目录。
-        let uid = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata("/proc/self").ok()?);
-        let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
-        for line in passwd.lines() {
-            let parts: Vec<&str> = line.split(':').collect();
-            if parts.len() >= 6 {
-                let file_uid: u32 = parts[2].parse().ok()?;
-                if file_uid == uid {
-                    return Some(std::ffi::OsString::from(parts[5]));
+        // Windows 不走这条路径——HOME 在 Windows 上通常由 Git Bash / MSYS 设置，
+        // 没设时走 %USERPROFILE%（由 std::env::home_dir 处理，但那不够可靠）。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let uid = MetadataExt::uid(&std::fs::metadata("/proc/self").ok()?);
+            let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+            for line in passwd.lines() {
+                let parts: Vec<&str> = line.split(':').collect();
+                if parts.len() >= 6 {
+                    let file_uid: u32 = parts[2].parse().ok()?;
+                    if file_uid == uid {
+                        return Some(std::ffi::OsString::from(parts[5]));
+                    }
                 }
             }
         }
