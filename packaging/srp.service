@@ -7,7 +7,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/default/srp
-ExecStart=/usr/bin/srp ${SRP_ARGS}
+# sh -c 让 $SRP_ARGS 被正确拆分成多个参数。
+# 否则 systemd 会把整个字符串当作一个参数传给 srp。
+ExecStart=/bin/sh -c 'exec /usr/bin/srp $SRP_ARGS'
 Restart=on-failure
 RestartSec=5
 # 限制单任务 panic 不影响主进程；日志走 journal。
