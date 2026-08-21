@@ -38,28 +38,43 @@ use super::backoff::Backoff;
 use super::config::{AuthMethod, Config, HostKeyPolicy};
 use super::handler::{ClientHandler, DisconnectSignal};
 
-/// 跨平台连接 SSH 代理。
+/// 跨平台连接 SSH 代理（ssh-agent）。
 ///
-/// Unix: 读取 `SSH_AUTH_SOCK` 环境变量连接 Unix domain socket。
-/// Windows: 使用 Pageant（PuTTY agent）协议。
+/// 两个平台的传输层完全不同，因此返回类型也不同：
+/// - Unix：读 `SSH_AUTH_SOCK`，走 Unix domain socket
+/// - Windows：走命名管道 `\\.\pipe\openssh-ssh-agent`，即 Windows 自带
+///   OpenSSH agent 服务使用的路径
 ///
-/// 返回类型在两个平台上不同（UnixStream vs PageantStream），
-/// 但两者都实现了 `AgentStream`，不影响调用方使用。
+/// 两个返回类型都实现了 russh 的 `AgentStream`，调用方无需关心差异。
+///
+/// 关于 Pageant：russh 也提供 `connect_pageant()`，但它的流类型来自
+/// russh 的私有依赖 `pageant` crate，外部无法在签名里引用，所以这里
+/// 统一走命名管道。用 PuTTY/Pageant 的用户请改用 `-i` 指定私钥文件。
 #[cfg(unix)]
 async fn connect_ssh_agent(
 ) -> anyhow::Result<russh::keys::agent::client::AgentClient<tokio::net::UnixStream>> {
     russh::keys::agent::client::AgentClient::connect_env()
         .await
-        .map_err(|e| anyhow!("SSH_AUTH_SOCK 未设置或代理不可达: {e}"))
+        .map_err(|e| anyhow!("SSH_AUTH_SOCK 未设置或 ssh-agent 不可达：{e}"))
 }
 
 #[cfg(windows)]
 async fn connect_ssh_agent() -> anyhow::Result<
-    russh::keys::agent::client::AgentClient<russh::keys::agent::pageant::PageantStream>,
+    russh::keys::agent::client::AgentClient<tokio::net::windows::named_pipe::NamedPipeClient>,
 > {
-    russh::keys::agent::client::AgentClient::connect_pageant()
+    // Windows OpenSSH agent 的固定管道路径。
+    const OPENSSH_AGENT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
+
+    russh::keys::agent::client::AgentClient::connect_named_pipe(OPENSSH_AGENT_PIPE)
         .await
-        .map_err(|e| anyhow!("无法连接 Pageant (PuTTY agent): {e}"))
+        .map_err(|e| {
+            anyhow!(
+                "无法连接 Windows OpenSSH agent（{OPENSSH_AGENT_PIPE}）：{e}\n\
+                 请确认 ssh-agent 服务已启动：Get-Service ssh-agent\n\
+                 启动方式：Start-Service ssh-agent\n\
+                 若使用 PuTTY/Pageant，请改用 -i 指定私钥文件。"
+            )
+        })
 }
 
 /// 会话代号。每次成功建连自增，用于识别"引用是否属于当前会话"。
