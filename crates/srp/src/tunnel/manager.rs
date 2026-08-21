@@ -38,6 +38,30 @@ use super::backoff::Backoff;
 use super::config::{AuthMethod, Config, HostKeyPolicy};
 use super::handler::{ClientHandler, DisconnectSignal};
 
+/// 跨平台连接 SSH 代理。
+///
+/// Unix: 读取 `SSH_AUTH_SOCK` 环境变量连接 Unix domain socket。
+/// Windows: 使用 Pageant（PuTTY agent）协议。
+///
+/// 返回类型在两个平台上不同（UnixStream vs PageantStream），
+/// 但两者都实现了 `AgentStream`，不影响调用方使用。
+#[cfg(unix)]
+async fn connect_ssh_agent(
+) -> anyhow::Result<russh::keys::agent::client::AgentClient<tokio::net::UnixStream>> {
+    russh::keys::agent::client::AgentClient::connect_env()
+        .await
+        .map_err(|e| anyhow!("SSH_AUTH_SOCK 未设置或代理不可达: {e}"))
+}
+
+#[cfg(windows)]
+async fn connect_ssh_agent() -> anyhow::Result<
+    russh::keys::agent::client::AgentClient<russh::keys::agent::pageant::PageantStream>,
+> {
+    russh::keys::agent::client::AgentClient::connect_pageant()
+        .await
+        .map_err(|e| anyhow!("无法连接 Pageant (PuTTY agent): {e}"))
+}
+
 /// 会话代号。每次成功建连自增，用于识别"引用是否属于当前会话"。
 pub type Epoch = u64;
 
@@ -350,7 +374,7 @@ impl TunnelManager {
                     .context("publickey authentication failed")?
             }
             AuthMethod::Agent => {
-                let mut agent = russh::keys::agent::client::AgentClient::connect_env()
+                let mut agent = connect_ssh_agent()
                     .await
                     .context("failed to connect to ssh-agent")?;
                 let identities = agent
