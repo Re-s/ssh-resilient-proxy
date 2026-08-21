@@ -125,11 +125,33 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-build-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+      # ARM64 交叉编译需要 MSVC 的 ARM64 工具集。
+      # 用 vswhere 定位实际安装路径，不硬编码版本与 edition：
+      # runner 镜像升级后 2022/Enterprise 这类路径随时会变。
       - name: Install ARM64 MSVC tools
         if: matrix.arch == 'arm64'
+        shell: pwsh
         run: |
-          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" modify --installPath "C:\Program Files\Microsoft Visual Studio\2022\Enterprise" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --quiet --wait 2>$null
-          echo "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC\*\bin\Hostx64\arm64" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -property installationPath
+          if (-not $vsPath) { throw "未找到 Visual Studio 安装路径" }
+          Write-Host "VS 安装路径: $vsPath"
+          $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+          $p = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList @(
+            'modify', '--installPath', "`"$vsPath`"",
+            '--add', 'Microsoft.VisualStudio.Component.VC.Tools.ARM64',
+            '--quiet', '--norestart'
+          )
+          Write-Host "vs_installer 退出码: $($p.ExitCode)"
+          # 3010 = 需要重启才完全生效，对命令行编译无影响，视为成功。
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
+            throw "ARM64 工具集安装失败，退出码 $($p.ExitCode)"
+          }
+          # 确认 ARM64 链接器确实落地了，否则后面的报错会很难懂。
+          $link = Get-ChildItem "$vsPath\VC\Tools\MSVC\*\bin\Hostx64\arm64\link.exe" -ErrorAction SilentlyContinue |
+                  Select-Object -First 1
+          if (-not $link) { throw "ARM64 link.exe 未找到，工具集没装上" }
+          Write-Host "ARM64 链接器: $($link.FullName)"
       - name: Build release binaries
         run: cargo build --release --target ${{ matrix.target }} -p srp -p srp-helper
       - name: Verify binaries
@@ -137,14 +159,16 @@ jobs:
           Get-Item target/${{ matrix.target }}/release/srp.exe | Select-Object Name, Length
           Get-Item target/${{ matrix.target }}/release/srp-helper.exe | Select-Object Name, Length
       - name: Package zip
+        shell: pwsh
         run: |
           $ARCH = "${{ matrix.arch }}"
           $PKG = "dist/srp_0.1.0_windows_${ARCH}"
-          New-Item -ItemType Directory -Force -Path "$PKG"
+          New-Item -ItemType Directory -Force -Path "$PKG" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/srp.exe" "$PKG/"
           Copy-Item "target/${{ matrix.target }}/release/srp-helper.exe" "$PKG/"
           Copy-Item "README.md" "$PKG/"
           Copy-Item "LICENSE" "$PKG/"
+          Copy-Item "packaging/WINDOWS.md" "$PKG/使用说明.md"
           Compress-Archive -Path "$PKG/*" -DestinationPath "dist/srp_0.1.0_windows_${ARCH}.zip"
       - uses: actions/upload-artifact@v4
         with:

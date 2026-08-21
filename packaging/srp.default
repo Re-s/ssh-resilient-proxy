@@ -2,18 +2,16 @@
 #
 # SSH Resilient Proxy 配置
 #
-# 最简用法：填入 SSH 目标即可工作。
-# 私钥会自动从 ~/.ssh/ 中发现，无需额外指定。
+# 只需填入 SSH 目标即可工作，私钥自动从 ~/.ssh/ 发现。
+# 不确定填什么就运行：sudo srp setup
 #
-# 编辑后执行 sudo systemctl restart srp 生效。
-#
-# ⚠ 不要用引号包裹值！
-#   正确：SRP_ARGS=root@10.0.0.1
-#   错误：SRP_ARGS="root@10.0.0.1"   ← 引号会导致解析失败
+# 改完执行：sudo systemctl restart srp
 #
 # 示例：
-#   SRP_ARGS=root@10.0.0.1
-#   SRP_ARGS=root@10.0.0.1 --socks5 0.0.0.0:1080 --http 0.0.0.0:8080
-#   SRP_ARGS=deploy@server --helper --allow *.internal
+#   SRP_ARGS="root@10.0.0.1"
+#   SRP_ARGS="root@10.0.0.1 --socks5 0.0.0.0:1080 --http 0.0.0.0:8080"
+#   SRP_ARGS="deploy@server --helper --allow '*.internal'"
+#
+# 引号可加可不加，两种都能正确拆分成多个参数。
 
-SRP_ARGS=
+SRP_ARGS=""

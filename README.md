@@ -37,6 +37,36 @@
 
 ## 快速开始
 
+### 通过 deb 包安装（推荐）
+
+```bash
+# 安装后，srp 命令已可用
+srp --help
+
+# 交互式配置（自动检测 ~/.ssh/config，写入 systemd 环境文件）
+# 需要 root 权限写入 /etc/default/srp
+sudo srp setup
+
+# 最简用法：走 ssh-agent，SOCKS5 监听 127.0.0.1:1080
+srp alice@gateway.example.com
+
+# 指定私钥 + 同时开 HTTP CONNECT 入口
+srp alice@gw.example.com:2222 \
+    -i ~/.ssh/id_ed25519 \
+    --http 127.0.0.1:8080
+
+# helper 模式（需先把 srp-helper 放到远端 PATH 里）
+srp alice@gw.example.com --helper --allow '*.internal'
+
+# 校验配置而不连接
+srp --config srp.toml check
+
+# 生成示例配置
+srp example > srp.toml
+```
+
+### 从源码构建
+
 ```bash
 # 构建
 cargo build --release
@@ -59,7 +89,7 @@ cargo build --release
 ./target/release/srp example > srp.toml
 ```
 
-验证代理可用：
+### 验证代理可用
 
 ```bash
 curl -x socks5h://127.0.0.1:1080 https://example.com
@@ -67,6 +97,20 @@ curl -x http://127.0.0.1:8080     https://example.com
 ```
 
 注意 `socks5h` 而非 `socks5`：前者把域名交给代理解析，DNS 在远端出口发生，避免本地 DNS 污染。
+
+### srp setup 子命令
+
+`srp setup` 是交互式配置命令，用于：
+1. 自动检测 `~/.ssh/config` 中的 SSH 主机配置
+2. 让用户选择一个主机作为代理跳板
+3. 将选择写入 `/etc/default/srp`（systemd 服务配置文件）
+4. 提供 systemctl 命令重启服务
+
+**使用场景**：通过 deb 包安装后首次配置，或需要重新配置代理目标时。
+
+**权限要求**：需要 root 权限写入 `/etc/default/srp`，建议使用 `sudo srp setup`。
+
+**非交互环境**：当 stdin 不是终端时（如管道、CI 环境），会打印手动配置指引并正常退出。
 
 ## 部署 helper 模式
 
@@ -100,6 +144,30 @@ srp alice@gw --host-key 'SHA256:abc123...'
 srp alice@gw --helper --allow '*.internal' --allow '10.0.0.0/8:443'
 ```
 
+**注意：** `--allow` 参数**仅在 helper 模式下生效**（即使用 `--helper` 时）。在默认的 `direct-tcpip` 模式下，`--allow` 参数会被静默忽略，不会产生任何效果。
+
+**环境变量传递密码。** 命令行参数会出现在 `ps` 输出和 shell 历史中，不建议直接传递密码。srp 支持通过环境变量传递敏感信息：
+
+- `SRP_KEY_PASSPHRASE`：私钥口令（对应 `--passphrase` 参数）
+- `SRP_SSH_PASSWORD`：SSH 密码认证（对应 `--password` 参数）
+- `SRP_PROXY_PASSWORD`：代理入口认证密码（对应 `--proxy-password` 参数）
+
+```bash
+# 推荐方式：通过环境变量传递密码
+export SRP_SSH_PASSWORD="my_secret_password"
+srp alice@gw.example.com
+
+# 或者在 systemd 服务中配置
+# /etc/default/srp
+SRP_ARGS=alice@gw.example.com
+SRP_SSH_PASSWORD=my_secret_password
+```
+
+使用环境变量比命令行参数更安全，因为：
+1. 进程列表（`ps aux`）不会显示环境变量值
+2. shell 历史记录不会保存环境变量赋值
+3. 可以在 systemd 服务文件中安全配置
+
 ## 配置文件
 
 ```toml
@@ -111,27 +179,31 @@ port = 22
 user = "alice"
 auth = { type = "public_key", path = "/home/alice/.ssh/id_ed25519" }
 # auth = { type = "agent" }
+# auth = { type = "password", password = "..." }
 host_key = "strict"
 keepalive_interval = "15s"
 keepalive_max = 3
+connect_timeout = "20s"  # SSH 连接超时时间，默认 20 秒
 
 [listen]
 socks5 = "127.0.0.1:1080"
 # http = "127.0.0.1:8080"
-# 监听非回环地址时必须设置
+# 监听非回环地址时必须设置凭据，否则等于开放代理。
 # username = "proxyuser"
 # password = "proxypass"
 
 [reconnect]
-initial_delay = "250ms"
-max_delay = "30s"
-jitter = 0.2
-dial_wait = "30s"       # 断网期间新请求最多等这么久
+enabled = true           # 是否启用自动重连，设为 false 可完全关闭自动重连
+initial_delay = "250ms"  # 首次重连延迟
+max_delay = "30s"        # 最大重连延迟
+multiplier = 2.0         # 指数退避乘数，默认 2.0
+jitter = 0.2             # 抖动系数，避免重连风暴
+dial_wait = "30s"        # 断网期间新请求最多等这么久
 
 [helper]
 remote_path = "srp-helper"
-stream_window = 4194304 # 每条流的重传缓冲，决定可恢复的数据量
-allow = []
+stream_window = 4194304  # 每条流的重传缓冲，决定可恢复的数据量
+allow = []               # 远端允许连接的目标白名单，留空表示不限制
 ```
 
 ## 架构

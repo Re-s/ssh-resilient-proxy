@@ -1,5 +1,7 @@
 //! `srp` 命令行入口。
 
+use std::cell::RefCell;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
@@ -121,13 +123,23 @@ struct ConnectArgs {
     #[arg(long = "allow", value_name = "PATTERN")]
     allow: Vec<String>,
 
-    /// SSH 保活间隔（秒）。
+    /// SSH 保活间隔（秒）。最小值为 1，传 0 会被钳位为 1 并给出警告。
     #[arg(long, default_value_t = 15, value_name = "SECS")]
     keepalive: u64,
 
     /// 隧道不可用时新请求最多等待多少秒。
     #[arg(long, default_value_t = 30, value_name = "SECS")]
     dial_wait: u64,
+}
+
+thread_local! {
+    /// 存储 build_config 阶段产生的 CLI 安全警告，供 check 子命令输出。
+    static CLI_WARNINGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 取出 build_config 阶段收集的 CLI 安全警告。
+fn take_cli_warnings() -> Vec<String> {
+    CLI_WARNINGS.with(|w| std::mem::take(&mut *w.borrow_mut()))
 }
 
 fn main() -> Result<()> {
@@ -163,7 +175,12 @@ fn main() -> Result<()> {
             println!("  http         : {:?}", cfg.listen.http);
             println!("  keepalive    : {:?}", cfg.ssh.keepalive_interval);
             println!("  dial wait    : {:?}", cfg.reconnect.dial_wait);
+            // 显示 config 层面的安全警告（只对有效地址生效）
             for w in cfg.security_warnings() {
+                println!("  ⚠ warning    : {w}");
+            }
+            // 显示 build_config 阶段收集的 CLI 级别警告
+            for w in take_cli_warnings() {
                 println!("  ⚠ warning    : {w}");
             }
             return Ok(());
@@ -191,10 +208,46 @@ fn init_tracing(level: &str) {
         .init();
 }
 
+/// 检查主机名是否为常见的代码托管平台，这类主机通常不适合作为 SSH 代理跳板。
+///
+/// 过滤条件：
+/// 1. 用户名为 `git`（GitHub/GitLab 等平台的默认 SSH 用户）
+/// 2. 主机名匹配常见代码托管平台（包括子域名）：
+///    - github.com, gitlab.com, bitbucket.org, codeberg.org, gitee.com 等
+fn is_git_host(user: &str, hostname: &str) -> bool {
+    // 用户名为 git 的条目通常是代码托管平台
+    if user == "git" {
+        return true;
+    }
+
+    // 常见代码托管平台的域名列表
+    let git_platforms = [
+        "github.com",
+        "gitlab.com",
+        "bitbucket.org",
+        "codeberg.org",
+        "gitee.com",
+        "git.oschina.net",
+        "coding.net",
+        "gogs.io",
+        "gitea.io",
+    ];
+
+    // 检查主机名是否匹配任何平台（包括子域名）
+    for platform in git_platforms {
+        if hostname == platform || hostname.ends_with(&format!(".{platform}")) {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// 从 `~/.ssh/config` 中提取 Host 条目，作为可能的 SSH 目标。
 ///
 /// 只提取有 HostName 的条目（跳过 * 通配符），
 /// 格式为 `User@HostName:Port` 或 `User@HostName`。
+/// 过滤掉明显不是代理跳板的条目（如 git 类主机）。
 fn discover_ssh_hosts() -> Vec<String> {
     let home = std::env::var_os("HOME").unwrap_or_default();
     let config_path = std::path::PathBuf::from(home).join(".ssh/config");
@@ -217,12 +270,15 @@ fn discover_ssh_hosts() -> Vec<String> {
                 if h != "*" && !hn.is_empty() {
                     let u = user.as_deref().unwrap_or("root");
                     let p = port.as_deref().unwrap_or("22");
-                    let target = if p == "22" {
-                        format!("{u}@{hn}")
-                    } else {
-                        format!("{u}@{hn}:{p}")
-                    };
-                    hosts.push(target);
+                    // 过滤 git 类主机，这类主机通常不适合作为 SSH 代理跳板
+                    if !is_git_host(u, hn) {
+                        let target = if p == "22" {
+                            format!("{u}@{hn}")
+                        } else {
+                            format!("{u}@{hn}:{p}")
+                        };
+                        hosts.push(target);
+                    }
                 }
             }
             current_host = None;
@@ -243,12 +299,15 @@ fn discover_ssh_hosts() -> Vec<String> {
                     if h != "*" && !hn.is_empty() {
                         let u = user.as_deref().unwrap_or("root");
                         let p = port.as_deref().unwrap_or("22");
-                        let target = if p == "22" {
-                            format!("{u}@{hn}")
-                        } else {
-                            format!("{u}@{hn}:{p}")
-                        };
-                        hosts.push(target);
+                        // 过滤 git 类主机，这类主机通常不适合作为 SSH 代理跳板
+                        if !is_git_host(u, hn) {
+                            let target = if p == "22" {
+                                format!("{u}@{hn}")
+                            } else {
+                                format!("{u}@{hn}:{p}")
+                            };
+                            hosts.push(target);
+                        }
                     }
                 }
                 current_host = Some(val.to_string());
@@ -268,12 +327,15 @@ fn discover_ssh_hosts() -> Vec<String> {
         if h != "*" && !hn.is_empty() {
             let u = user.as_deref().unwrap_or("root");
             let p = port.as_deref().unwrap_or("22");
-            let target = if p == "22" {
-                format!("{u}@{hn}")
-            } else {
-                format!("{u}@{hn}:{p}")
-            };
-            hosts.push(target);
+            // 过滤 git 类主机，这类主机通常不适合作为 SSH 代理跳板
+            if !is_git_host(u, hn) {
+                let target = if p == "22" {
+                    format!("{u}@{hn}")
+                } else {
+                    format!("{u}@{hn}:{p}")
+                };
+                hosts.push(target);
+            }
         }
     }
 
@@ -281,128 +343,228 @@ fn discover_ssh_hosts() -> Vec<String> {
 }
 
 /// 交互式配置：检测 SSH 配置，让用户选择目标，写入 /etc/default/srp。
+/// 写入 systemd 环境文件，失败时给出可直接复制的补救命令。
+fn write_setup_config(target: &str) -> Result<()> {
+    use std::io::ErrorKind;
+
+    let path = "/etc/default/srp";
+    let content = format!(
+        "# /etc/default/srp — 由 srp setup 生成\n\
+         # 引号可加可不加，systemd 的 $SRP_ARGS 会正确拆分参数。\n\
+         SRP_ARGS=\"{target}\"\n"
+    );
+
+    match std::fs::write(path, &content) {
+        Ok(()) => {
+            println!();
+            println!("✓ 已写入 {path}");
+            println!();
+            println!("接下来执行：");
+            println!("  sudo systemctl daemon-reload");
+            println!("  sudo systemctl restart srp");
+            println!("  systemctl status srp");
+            Ok(())
+        }
+        // 没有 root 权限是最常见的情况：不要只说"权限不足"，
+        // 直接给出可以整段复制执行的命令。
+        Err(e) if matches!(e.kind(), ErrorKind::PermissionDenied) => {
+            println!();
+            println!("⚠ 没有写入 {path} 的权限（需要 root）。");
+            println!();
+            println!("请复制执行下面三行：");
+            println!();
+            println!("  echo 'SRP_ARGS=\"{target}\"' | sudo tee {path}");
+            println!("  sudo systemctl daemon-reload");
+            println!("  sudo systemctl restart srp");
+            Ok(())
+        }
+        Err(e) => Err(anyhow::anyhow!("写入 {path} 失败：{e}")),
+    }
+}
+
+/// 非交互环境下打印手动配置指引。
+///
+/// stdin 不是终端时（管道、CI、被服务调用）交互提示没有意义，
+/// 直接给出完整命令，并以成功退出——这不是错误场景。
+fn print_manual_setup_guide(candidates: &[String]) {
+    let example = candidates
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "alice@gateway.example.com".to_string());
+
+    println!("检测到非交互环境（stdin 不是终端），跳过交互式提问。");
+    println!();
+    if !candidates.is_empty() {
+        println!("从 ~/.ssh/config 中发现这些候选目标：");
+        for c in candidates {
+            println!("  {c}");
+        }
+        println!();
+    }
+    println!("请把下面三行里的目标换成你自己的，然后复制执行：");
+    println!();
+    println!("  echo 'SRP_ARGS=\"{example}\"' | sudo tee /etc/default/srp");
+    println!("  sudo systemctl daemon-reload");
+    println!("  sudo systemctl restart srp");
+    println!();
+    println!("验证配置是否正确（不会真的连接）：");
+    println!("  srp {example} check");
+}
+
+/// 读取一行输入并去掉首尾空白。
+fn read_line_trimmed() -> Result<String> {
+    use std::io::BufRead;
+
+    let mut buf = String::new();
+    std::io::stdin().lock().read_line(&mut buf)?;
+    Ok(buf.trim().to_string())
+}
+
+/// 交互式配置：检测 SSH 配置，让用户选择目标，写入 /etc/default/srp。
 fn run_setup() -> Result<()> {
-    use std::io::{self, Write};
+    use std::io::Write;
 
     println!("🔧 srp 交互式配置");
     println!();
 
-    // 检测 SSH 配置。
     let hosts = discover_ssh_hosts();
-    if !hosts.is_empty() {
+
+    // 非终端环境不做交互，直接给可复制的命令。
+    if !std::io::stdin().is_terminal() {
+        print_manual_setup_guide(&hosts);
+        return Ok(());
+    }
+
+    if hosts.is_empty() {
+        println!("未在 ~/.ssh/config 中发现可用作跳板的主机。");
+    } else {
         println!("检测到 ~/.ssh/config 中的主机：");
         for (i, h) in hosts.iter().enumerate() {
             println!("  [{}] {}", i + 1, h);
         }
         println!("  [0] 手动输入");
-        println!();
+    }
+    println!();
 
-        print!("请选择编号（或直接输入目标）：");
-        io::stdout().flush()?;
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let input = input.trim();
+    // 最多给 3 次机会，避免一次误按回车就得从头再来。
+    const MAX_TRIES: usize = 3;
+    let mut target = String::new();
 
-        let target = if input == "0" || input.is_empty() {
-            print!("SSH 目标（user@host:port）：");
-            io::stdout().flush()?;
-            let mut t = String::new();
-            io::stdin().read_line(&mut t)?;
-            t.trim().to_string()
-        } else if let Ok(idx) = input.parse::<usize>() {
-            if idx >= 1 && idx <= hosts.len() {
-                hosts[idx - 1].clone()
+    for attempt in 1..=MAX_TRIES {
+        let remaining = MAX_TRIES - attempt;
+
+        if hosts.is_empty() {
+            print!("SSH 目标（user@host[:port]）：");
+        } else {
+            print!("请选择编号 0-{}，或直接输入目标：", hosts.len());
+        }
+        std::io::stdout().flush()?;
+
+        let input = read_line_trimmed()?;
+
+        // 空输入：重试而不是直接退出。
+        if input.is_empty() {
+            if remaining == 0 {
+                anyhow::bail!("连续 {MAX_TRIES} 次未输入内容，已取消配置。");
+            }
+            println!("输入不能为空，请重新输入（还剩 {remaining} 次机会）。");
+            continue;
+        }
+
+        // 纯数字优先当作编号处理。
+        if let Ok(idx) = input.parse::<usize>() {
+            if idx == 0 {
+                // 0 表示手动输入，继续下一轮但强制走手动分支。
+                print!("SSH 目标（user@host[:port]）：");
+                std::io::stdout().flush()?;
+                let manual = read_line_trimmed()?;
+                if manual.is_empty() {
+                    if remaining == 0 {
+                        anyhow::bail!("未输入目标，已取消配置。");
+                    }
+                    println!("输入不能为空，请重新输入（还剩 {remaining} 次机会）。");
+                    continue;
+                }
+                target = manual;
+            } else if idx <= hosts.len() {
+                target = hosts[idx - 1].clone();
             } else {
-                anyhow::bail!("无效编号: {input}");
+                if remaining == 0 {
+                    anyhow::bail!("编号 {idx} 超出范围，已取消配置。");
+                }
+                println!(
+                    "编号 {idx} 超出范围，有效范围是 1-{}（或 0 手动输入），还剩 {remaining} 次机会。",
+                    hosts.len()
+                );
+                continue;
             }
         } else {
-            // 直接输入的目标。
-            input.to_string()
-        };
-
-        if target.is_empty() {
-            anyhow::bail!("目标不能为空");
+            target = input;
         }
 
-        // 验证目标格式。
-        let _ = parse_target(&target)
-            .context("目标格式无效，应为 user@host[:port]")?;
-
-        // 写入配置。
-        let default_path = "/etc/default/srp";
-        let content = format!(
-            "# /etc/default/srp — 由 srp setup 自动生成\n\
-             SRP_ARGS={}\n",
-            target
-        );
-
-        match std::fs::write(default_path, &content) {
-            Ok(()) => {
-                println!();
-                println!("✓ 已写入 {default_path}");
-                println!();
-                println!("接下来：");
-                println!("  sudo systemctl daemon-reload");
-                println!("  sudo systemctl restart srp");
-                println!("  systemctl status srp");
+        // 校验格式，格式错误也给重试机会。
+        match parse_target(&target) {
+            Ok(_) => break,
+            Err(e) => {
+                if remaining == 0 {
+                    return Err(e).context("目标格式无效，已取消配置");
+                }
+                println!("{e}");
+                println!("请重新输入（还剩 {remaining} 次机会）。");
+                target.clear();
             }
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-                println!();
-                println!("⚠ 权限不足，请手动执行：");
-                println!();
-                println!("  echo 'SRP_ARGS={target}' | sudo tee {default_path}");
-                println!("  sudo systemctl daemon-reload");
-                println!("  sudo systemctl restart srp");
-            }
-            Err(e) => return Err(e.into()),
-        }
-    } else {
-        println!("未检测到 ~/.ssh/config。");
-        println!();
-        print!("SSH 目标（user@host:port）：");
-        io::stdout().flush()?;
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let target = input.trim();
-
-        if target.is_empty() {
-            anyhow::bail!("目标不能为空");
-        }
-
-        let _ = parse_target(target)
-            .context("目标格式无效，应为 user@host[:port]")?;
-
-        let default_path = "/etc/default/srp";
-        let content = format!("# /etc/default/srp\nSRP_ARGS={}\n", target);
-
-        match std::fs::write(default_path, &content) {
-            Ok(()) => {
-                println!();
-                println!("✓ 已写入 {default_path}");
-                println!();
-                println!("接下来：");
-                println!("  sudo systemctl daemon-reload");
-                println!("  sudo systemctl restart srp");
-                println!("  systemctl status srp");
-            }
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-                println!();
-                println!("⚠ 权限不足，请手动执行：");
-                println!();
-                println!("  echo 'SRP_ARGS={target}' | sudo tee {default_path}");
-                println!("  sudo systemctl daemon-reload");
-                println!("  sudo systemctl restart srp");
-            }
-            Err(e) => return Err(e.into()),
         }
     }
 
-    Ok(())
+    if target.is_empty() {
+        anyhow::bail!("未得到有效的 SSH 目标，已取消配置。");
+    }
+
+    println!();
+    println!("将使用目标：{target}");
+
+    write_setup_config(&target)
+}
+
+/// 校验单个监听地址字符串能否解析为 `SocketAddr`。
+///
+/// 返回 Ok(SocketAddr) 表示解析成功，Err 包含中文错误描述。
+fn validate_listen_addr(addr_str: &str, param_name: &str) -> Result<std::net::SocketAddr> {
+    // 尝试直接解析为 SocketAddr（如 "127.0.0.1:1080"）
+    if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
+        return Ok(addr);
+    }
+
+    // 检查是否缺少端口号（纯 IP/主机名，没有冒号）
+    let has_colon = addr_str.contains(':');
+    let has_bracket = addr_str.contains('[');
+
+    if has_bracket {
+        // IPv6 字面量格式但解析失败
+        anyhow::bail!(
+            "{param_name} 的地址 `{addr_str}` 格式不正确。\
+             IPv6 地址应写为 [::1]:端口号，例如 [::1]:1080"
+        );
+    }
+
+    if !has_colon {
+        // 只有 IP/主机名，缺少端口号
+        anyhow::bail!(
+            "{param_name} 的地址 `{addr_str}` 缺少端口号。\
+             格式应为 IP:端口号，例如 127.0.0.1:1080"
+        );
+    }
+
+    // 有冒号但解析失败——可能是无效 IP
+    anyhow::bail!(
+        "{param_name} 的地址 `{addr_str}` 无法解析。\
+         格式应为 IP:端口号，例如 127.0.0.1:1080"
+    );
 }
 
 fn build_config(cli: &Cli) -> Result<Config> {
     if let Some(path) = &cli.config {
-        return Config::load(path).context("failed to load configuration file");
+        return Config::load(path).context("加载配置文件失败");
     }
 
     let a = &cli.connect;
@@ -420,6 +582,14 @@ fn build_config(cli: &Cli) -> Result<Config> {
     )?;
     let (user, host, port) = parse_target(target)?;
 
+    // 缺陷 8：SSH 端口 0 警告
+    if port == 0 {
+        let msg = "SSH 端口为 0，这通常不是预期值。标准 SSH 端口是 22，\
+             请确认是否需要指定端口。";
+        eprintln!("⚠ warning: {msg}");
+        CLI_WARNINGS.with(|w| w.borrow_mut().push(msg.to_string()));
+    }
+
     let auth = if a.agent {
         AuthMethod::Agent
     } else if let Some(p) = &a.password {
@@ -427,8 +597,38 @@ fn build_config(cli: &Cli) -> Result<Config> {
             password: p.clone(),
         }
     } else if let Some(k) = &a.identity {
+        // 缺陷 2：校验 --identity 私钥路径
+        let key_path = expand_tilde(k)?;
+        if !key_path.exists() {
+            anyhow::bail!(
+                "私钥路径 `{}` 不存在。请检查路径是否正确，\
+                 或改用 --agent 走 ssh-agent 认证。",
+                key_path.display()
+            );
+        } else if !key_path.is_file() {
+            anyhow::bail!(
+                "私钥路径 `{}` 不是一个文件（可能是目录或符号链接）。\
+                 请指定一个有效的私钥文件路径。",
+                key_path.display()
+            );
+        } else {
+            // 检查可读性：尝试打开文件
+            use std::fs::File;
+            match File::open(&key_path) {
+                Ok(_) => {}
+                Err(e) => {
+                    anyhow::bail!(
+                        "无法读取私钥文件 `{}`：{}。\
+                         请检查文件权限（chmod 600 {}）或改用 --agent 走 ssh-agent 认证。",
+                        key_path.display(),
+                        e,
+                        key_path.display()
+                    );
+                }
+            }
+        }
         AuthMethod::PublicKey {
-            path: expand_tilde(k)?,
+            path: key_path,
             passphrase: a.passphrase.clone(),
         }
     } else if let Some(path) = discover_default_identity() {
@@ -449,6 +649,42 @@ fn build_config(cli: &Cli) -> Result<Config> {
         other => HostKeyPolicy::Pinned(other.to_string()),
     };
 
+    // 缺陷 5：keepalive 0 警告
+    let keepalive = if a.keepalive == 0 {
+        let msg = "--keepalive 0 不是有效值，已按最小值 1 秒生效。\
+             如果想大幅降低保活频率（减少流量），请设置一个较大的值，例如 --keepalive 300（5 分钟）。";
+        eprintln!("⚠ warning: {msg}");
+        CLI_WARNINGS.with(|w| w.borrow_mut().push(msg.to_string()));
+        std::time::Duration::from_secs(1)
+    } else {
+        std::time::Duration::from_secs(a.keepalive)
+    };
+
+    // 缺陷 4：校验所有监听地址（在构建 Config 之前）
+    let socks5_addr = if a.no_socks5 {
+        None
+    } else {
+        validate_listen_addr(&a.socks5, "--socks5")?;
+        Some(a.socks5.clone())
+    };
+
+    let http_addr = if let Some(ref http) = a.http {
+        validate_listen_addr(http, "--http")?;
+        Some(http.clone())
+    } else {
+        None
+    };
+
+    // 缺陷 6：端口冲突检测——两个前端不能绑定同一地址
+    if let (Some(ref s), Some(ref h)) = (&socks5_addr, &http_addr) {
+        if s == h {
+            anyhow::bail!(
+                "--socks5 和 --http 使用了相同的监听地址 `{s}`，\
+                 两个前端不能绑定同一端口。请为它们指定不同的地址。"
+            );
+        }
+    }
+
     let cfg = Config {
         ssh: SshConfig {
             host,
@@ -457,7 +693,7 @@ fn build_config(cli: &Cli) -> Result<Config> {
             auth,
             host_key,
             known_hosts: a.known_hosts.clone(),
-            keepalive_interval: std::time::Duration::from_secs(a.keepalive.max(1)),
+            keepalive_interval: keepalive,
             keepalive_max: 3,
             connect_timeout: std::time::Duration::from_secs(20),
         },
@@ -467,12 +703,8 @@ fn build_config(cli: &Cli) -> Result<Config> {
             TunnelMode::DirectTcpip
         },
         listen: ListenConfig {
-            socks5: if a.no_socks5 {
-                None
-            } else {
-                Some(a.socks5.clone())
-            },
-            http: a.http.clone(),
+            socks5: socks5_addr,
+            http: http_addr,
             username: a.proxy_user.clone(),
             password: a.proxy_password.clone(),
         },
@@ -488,6 +720,15 @@ fn build_config(cli: &Cli) -> Result<Config> {
     };
 
     cfg.validate()?;
+
+    // 缺陷 3：--allow 在非 helper 模式下静默失效——发出警告
+    if !a.allow.is_empty() && cfg.mode != TunnelMode::Helper {
+        let msg = "--allow 目标白名单在当前模式（DirectTcpip）下不生效。\
+             白名单只在 --helper 模式下生效。如需限制可访问目标，请加上 --helper。";
+        eprintln!("⚠ warning: {msg}");
+        CLI_WARNINGS.with(|w| w.borrow_mut().push(msg.to_string()));
+    }
+
     Ok(cfg)
 }
 
@@ -520,37 +761,68 @@ fn discover_default_identity() -> Option<PathBuf> {
 ///
 /// IPv6 字面量需要方括号（`user@[::1]:22`），否则冒号会与端口分隔符歧义。
 fn parse_target(s: &str) -> Result<(String, String, u16)> {
-    let (user, rest) = s
-        .split_once('@')
-        .context("SSH target must look like user@host[:port]")?;
+    // 缺陷 7：检查格式完整性并给出中文提示
+    let (user, rest) = match s.split_once('@') {
+        Some((u, r)) => (u, r),
+        None => {
+            anyhow::bail!(
+                "SSH 目标格式错误，应为 user@host[:port]，例如 root@10.0.0.1 或 alice@gw:2222"
+            );
+        }
+    };
     if user.is_empty() {
-        anyhow::bail!("SSH target is missing the user part");
+        anyhow::bail!("SSH 目标缺少用户名部分，格式应为 user@host[:port]，例如 root@10.0.0.1");
     }
 
     let (host, port) = if let Some(stripped) = rest.strip_prefix('[') {
         // IPv6 字面量
         let (addr, tail) = stripped
             .split_once(']')
-            .context("unterminated IPv6 literal in SSH target")?;
+            .context("SSH 目标中 IPv6 字面量未闭合，格式应为 user@[::1]:port 或 user@[::1]")?;
         let port = match tail.strip_prefix(':') {
-            Some(p) => p.parse().context("invalid port in SSH target")?,
+            Some(p) => p
+                .parse()
+                .context("SSH 目标中端口号格式错误，应为纯数字，例如 user@[::1]:2222")?,
             None if tail.is_empty() => 22,
-            None => anyhow::bail!("unexpected text after IPv6 literal in SSH target"),
+            None => anyhow::bail!("SSH 目标 IPv6 字面量后面有多余文本，格式应为 user@[::1]:port"),
         };
         (addr.to_string(), port)
     } else {
         match rest.rsplit_once(':') {
             Some((h, p)) => (
                 h.to_string(),
-                p.parse().context("invalid port in SSH target")?,
+                p.parse()
+                    .context("SSH 目标中端口号格式错误，应为纯数字，例如 user@host:2222")?,
             ),
             None => (rest.to_string(), 22),
         }
     };
 
     if host.is_empty() {
-        anyhow::bail!("SSH target is missing the host part");
+        anyhow::bail!("SSH 目标缺少主机名部分，格式应为 user@host[:port]，例如 root@10.0.0.1");
     }
+
+    // 缺陷 1：主机名中不允许包含空白字符
+    if host.contains(char::is_whitespace) {
+        // 检测是否包含以 '-' 开头的词——说明用户把命令行参数包进引号了
+        let has_flag = host.split_whitespace().any(|part| part.starts_with('-'));
+        if has_flag {
+            anyhow::bail!(
+                "SSH 目标里出现了空格：`{}`\n\
+                 看起来命令行参数被引号包进了主机名。去掉引号即可：\n\
+                 例如：srp {}",
+                s,
+                s.replace(char::is_whitespace, " ")
+            );
+        } else {
+            anyhow::bail!(
+                "SSH 目标主机名中包含空格：`{}`\n\
+                 主机名不能包含空格，请检查输入是否正确",
+                host
+            );
+        }
+    }
+
     Ok((user.to_string(), host, port))
 }
 
@@ -607,6 +879,30 @@ allow = []
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_hosts_are_filtered_from_setup_candidates() {
+        // 用户名为 git 的一律排除，无论主机名是什么。
+        assert!(is_git_host("git", "example.com"));
+        // 平台域名本身与其子域名都要排除。
+        assert!(is_git_host("anyone", "github.com"));
+        assert!(is_git_host("anyone", "ssh.github.com"));
+        assert!(is_git_host("anyone", "gitlab.com"));
+        assert!(is_git_host("anyone", "altssh.gitlab.com"));
+        assert!(is_git_host("anyone", "bitbucket.org"));
+        assert!(is_git_host("anyone", "gitee.com"));
+    }
+
+    #[test]
+    fn normal_jump_hosts_survive_the_filter() {
+        // 真正能做跳板的主机不能被误杀。
+        assert!(!is_git_host("root", "10.0.0.1"));
+        assert!(!is_git_host("alice", "gateway.example.com"));
+        assert!(!is_git_host("deploy", "prod-bastion.internal"));
+        // 仅仅包含 github 子串但不是该域名，不应被排除。
+        assert!(!is_git_host("alice", "mygithub.example.com"));
+        assert!(!is_git_host("alice", "github.com.evil.net"));
+    }
 
     #[test]
     fn parses_plain_and_ported_targets() {
@@ -716,5 +1012,209 @@ mod tests {
         let cli = Cli::parse_from(["srp"]);
         let err = build_config(&cli).expect_err("must fail");
         assert!(err.to_string().contains("未指定 SSH 目标"), "{err}");
+    }
+
+    // ==================== 缺陷 1 测试：引号包裹的目标 ====================
+
+    #[test]
+    fn rejects_quoted_target_with_flag_in_host() {
+        // 缺陷 1：主机名中包含以 '-' 开头的参数（用户把命令行参数包进引号）
+        let err =
+            parse_target("root@1.2.3.4 --helper").expect_err("should reject whitespace in host");
+        let msg = err.to_string();
+        assert!(msg.contains("空格"), "应指出空格问题: {msg}");
+        assert!(msg.contains("--helper"), "应提到被吞入的参数: {msg}");
+        assert!(msg.contains("引号"), "应提示去掉引号: {msg}");
+    }
+
+    #[test]
+    fn rejects_quoted_target_with_space_but_no_flag() {
+        // 缺陷 1：主机名含空格但不含以 '-' 开头的词
+        let err = parse_target("root@my host").expect_err("should reject whitespace in host");
+        let msg = err.to_string();
+        assert!(msg.contains("空格"), "应指出空格问题: {msg}");
+        assert!(!msg.contains("引号"), "不应提示引号: {msg}");
+    }
+
+    // ==================== 缺陷 2 测试：私钥路径校验 ====================
+
+    #[test]
+    fn identity_path_not_found() {
+        let cli = Cli::parse_from(["srp", "root@host", "--identity", "/does/not/exist"]);
+        let err = build_config(&cli).expect_err("should reject missing identity");
+        let msg = err.to_string();
+        assert!(msg.contains("不存在"), "应指出路径不存在: {msg}");
+        assert!(msg.contains("--agent"), "建议改用 --agent: {msg}");
+    }
+
+    #[test]
+    fn identity_path_is_directory() {
+        let cli = Cli::parse_from(["srp", "root@host", "--identity", "/tmp"]);
+        let err = build_config(&cli).expect_err("should reject directory");
+        let msg = err.to_string();
+        assert!(msg.contains("不是一个文件"), "应指出不是文件: {msg}");
+    }
+
+    #[test]
+    fn identity_path_not_readable() {
+        // 创建一个不可读的文件
+        let dir = std::env::temp_dir().join("srp_test_identity_unreadable");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("unreachable.key");
+        std::fs::write(&file_path, "fake-key").unwrap();
+        // 设置权限为 000（不可读）
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+
+        let cli = Cli::parse_from([
+            "srp",
+            "root@host",
+            "--identity",
+            file_path.to_str().unwrap(),
+        ]);
+        let err = build_config(&cli).expect_err("should reject unreadable key");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("无法读取") || msg.contains("权限"),
+            "应指出权限问题: {msg}"
+        );
+
+        // 清理
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ==================== 缺陷 3 测试：--allow 不加 --helper ====================
+
+    #[test]
+    fn allow_without_helper_warns() {
+        let cli = Cli::parse_from(["srp", "root@host", "--allow", "*.internal"]);
+        let cfg = build_config(&cli).unwrap();
+        assert_eq!(cfg.mode, TunnelMode::DirectTcpip);
+        // 检查是否生成了警告
+        let warnings = CLI_WARNINGS.with(|w| w.borrow().clone());
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("--allow") && w.contains("--helper")),
+            "应提示 --allow 在 DirectTcpip 模式下不生效: {warnings:?}"
+        );
+    }
+
+    // ==================== 缺陷 4 测试：监听地址校验 ====================
+
+    #[test]
+    fn socks5_missing_port() {
+        let cli = Cli::parse_from(["srp", "root@host", "--socks5", "127.0.0.1"]);
+        let err = build_config(&cli).expect_err("should reject missing port");
+        let msg = err.to_string();
+        assert!(msg.contains("--socks5"), "应指出是哪个参数: {msg}");
+        assert!(msg.contains("缺少端口号"), "应说明缺少端口号: {msg}");
+    }
+
+    #[test]
+    fn socks5_invalid_ip() {
+        let cli = Cli::parse_from(["srp", "root@host", "--socks5", "abc:1080"]);
+        let err = build_config(&cli).expect_err("should reject invalid addr");
+        let msg = err.to_string();
+        assert!(msg.contains("--socks5"), "应指出是哪个参数: {msg}");
+        assert!(msg.contains("无法解析"), "应说明无法解析: {msg}");
+    }
+
+    #[test]
+    fn socks5_garbage_ip() {
+        let cli = Cli::parse_from(["srp", "root@host", "--socks5", "999.999.999.999:1080"]);
+        let err = build_config(&cli).expect_err("should reject garbage IP");
+        let msg = err.to_string();
+        assert!(msg.contains("--socks5"), "应指出是哪个参数: {msg}");
+        assert!(msg.contains("无法解析"), "应说明无法解析: {msg}");
+    }
+
+    // ==================== 缺陷 5 测试：keepalive 0 ====================
+
+    #[test]
+    fn keepalive_zero_warns_and_clamps() {
+        let cli = Cli::parse_from(["srp", "root@host", "--keepalive", "0"]);
+        let cfg = build_config(&cli).unwrap();
+        assert_eq!(
+            cfg.ssh.keepalive_interval,
+            std::time::Duration::from_secs(1),
+            "keepalive 0 应被钳位为 1 秒"
+        );
+        let warnings = CLI_WARNINGS.with(|w| w.borrow().clone());
+        assert!(
+            warnings.iter().any(|w| w.contains("--keepalive")),
+            "应提示 keepalive 0 不是有效值: {warnings:?}"
+        );
+    }
+
+    // ==================== 缺陷 6 测试：端口冲突 ====================
+
+    #[test]
+    fn port_conflict_between_socks5_and_http() {
+        let cli = Cli::parse_from([
+            "srp",
+            "root@host",
+            "--socks5",
+            "127.0.0.1:1080",
+            "--http",
+            "127.0.0.1:1080",
+        ]);
+        let err = build_config(&cli).expect_err("should reject port conflict");
+        let msg = err.to_string();
+        assert!(msg.contains("相同"), "应指出地址相同: {msg}");
+        assert!(
+            msg.contains("--socks5") && msg.contains("--http"),
+            "应同时提到两个参数: {msg}"
+        );
+    }
+
+    // ==================== 缺陷 7 测试：parse_target 中文化 ====================
+
+    #[test]
+    fn parse_target_errors_are_chinese() {
+        // 缺少 @
+        let err = parse_target("abc").unwrap_err();
+        assert!(
+            err.to_string().contains("user@host"),
+            "缺少 @ 应有中文格式说明: {err}"
+        );
+        // 端口号非数字
+        let err = parse_target("user@host:abc").unwrap_err();
+        assert!(
+            err.to_string().contains("端口号"),
+            "非法端口应提示端口号: {err}"
+        );
+        // 缺用户名
+        let err = parse_target("@host").unwrap_err();
+        assert!(
+            err.to_string().contains("用户名"),
+            "缺少用户应提示用户名: {err}"
+        );
+        // 缺主机名
+        let err = parse_target("user@").unwrap_err();
+        assert!(
+            err.to_string().contains("主机名"),
+            "缺少主机应提示主机名: {err}"
+        );
+    }
+
+    // ==================== 缺陷 8 测试：SSH 端口 0 ====================
+
+    #[test]
+    fn ssh_port_zero_warns() {
+        let cli = Cli::parse_from(["srp", "user@host:0"]);
+        let cfg = build_config(&cli).unwrap();
+        assert_eq!(cfg.ssh.port, 0, "端口值应保留为 0");
+        let warnings = CLI_WARNINGS.with(|w| w.borrow().clone());
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("端口") && w.contains("0") && w.contains("22")),
+            "应提示端口 0 通常不是预期值且标准端口是 22: {warnings:?}"
+        );
     }
 }
