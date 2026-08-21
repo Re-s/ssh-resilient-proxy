@@ -52,7 +52,10 @@ WantedBy=multi-user.target
 #   [Service]
 #   User=youruser
 #   Group=youruser
+#   Environment=HOME=/home/youruser
 #
+# 注意 Environment=HOME 不是可选的——service 文件里默认设了 HOME=/root，
+# 不改的话进程会以 youruser 身份去 /root/.ssh/ 下找密钥，永远找不到。
 # 保存后执行：
 #
 #   sudo systemctl daemon-reload && sudo systemctl restart srp

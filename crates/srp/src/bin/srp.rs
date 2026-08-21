@@ -409,6 +409,9 @@ fn print_manual_setup_guide(candidates: &[String]) {
     println!();
     println!("验证配置是否正确（不会真的连接）：");
     println!("  srp {example} check");
+    println!();
+    println!("提示：服务默认以 root 运行。如果通过 systemctl edit 加了 User=xxx，");
+    println!("记得同时加 Environment=HOME=/home/xxx，否则进程会去 /root/.ssh/ 找密钥。");
 }
 
 /// 读取一行输入并去掉首尾空白。
