@@ -97,8 +97,8 @@ $env:SRP_PROXY_PASSWORD = "secret"
 
 ## 选哪个架构
 
-- `srp_0.1.0_windows_amd64.zip` — 绝大多数 Windows PC（Intel / AMD 处理器）
-- `srp_0.1.0_windows_arm64.zip` — ARM 设备（Surface Pro X、骁龙笔记本等）
+- `srp_0.2.0_windows_amd64.zip` — 绝大多数 Windows PC（Intel / AMD 处理器）
+- `srp_0.2.0_windows_arm64.zip` — ARM 设备（Surface Pro X、骁龙笔记本等）
 
 不确定就看「设置 → 系统 → 系统信息 → 系统类型」。
 

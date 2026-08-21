@@ -84,13 +84,27 @@ jobs:
         run: |
           file target/${{ matrix.target }}/release/srp
           file target/${{ matrix.target }}/release/srp-helper
+      # 版本号只从 Cargo.toml 读取，避免散落在多处后忘记同步。
+      - name: Resolve version
+        id: ver
+        run: |
+          set -euo pipefail
+          # 按名字精确取 srp 这个 crate，不要依赖 packages 数组下标：
+          # cargo metadata 的顺序不保证，[0] 实际是 srp-proto。
+          V=$(cargo metadata --no-deps --format-version 1 \
+              | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="srp"))')
+          test -n "$V"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "构建版本: $V"
       - name: Package deb
         run: |
+          set -euo pipefail
           ARCH="${{ matrix.arch }}"
-          PKG="dist/srp_0.1.0_${ARCH}"
+          VER="${{ steps.ver.outputs.version }}"
+          PKG="dist/srp_${VER}_${ARCH}"
           mkdir -p "$PKG/DEBIAN" "$PKG/usr/bin" "$PKG/usr/share/doc/srp" \
                    "$PKG/lib/systemd/system" "$PKG/etc/default"
-          printf 'Package: srp\nVersion: 0.1.0\nArchitecture: %s\nDepends: libc6 (>= 2.38), systemd\nMaintainer: wakmemlody <dev@agent.local>\nDescription: SSH resilient proxy\n SOCKS5/HTTP CONNECT proxy over SSH with automatic\n reconnection, keepalive, and optional byte-level\n resume via a remote helper binary.\n' "$ARCH" > "$PKG/DEBIAN/control"
+          printf 'Package: srp\nVersion: %s\nArchitecture: %s\nDepends: libc6 (>= 2.38), systemd\nMaintainer: wakmemlody <dev@agent.local>\nDescription: SSH resilient proxy\n SOCKS5/HTTP CONNECT proxy over SSH with automatic\n reconnection, keepalive, and optional byte-level\n resume via a remote helper binary.\n' "$VER" "$ARCH" > "$PKG/DEBIAN/control"
           cp target/${{ matrix.target }}/release/srp "$PKG/usr/bin/"
           cp target/${{ matrix.target }}/release/srp-helper "$PKG/usr/bin/"
           chmod 755 "$PKG/usr/bin/srp" "$PKG/usr/bin/srp-helper"
@@ -101,7 +115,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: srp-${{ matrix.arch }}
-          path: dist/srp_0.1.0_${{ matrix.arch }}.deb
+          path: dist/srp_${{ steps.ver.outputs.version }}_${{ matrix.arch }}.deb
 
   build-windows:
     runs-on: windows-latest
@@ -158,22 +172,34 @@ jobs:
         run: |
           Get-Item target/${{ matrix.target }}/release/srp.exe | Select-Object Name, Length
           Get-Item target/${{ matrix.target }}/release/srp-helper.exe | Select-Object Name, Length
+      # 版本号只从 Cargo.toml 读取，避免散落多处后忘记同步。
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          # 按名字精确取 srp，不依赖 packages 数组下标。
+          $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $v = ($meta.packages | Where-Object { $_.name -eq 'srp' }).version
+          if (-not $v) { throw "未能从 cargo metadata 解析出 srp 的版本号" }
+          "version=$v" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          Write-Host "构建版本: $v"
       - name: Package zip
         shell: pwsh
         run: |
           $ARCH = "${{ matrix.arch }}"
-          $PKG = "dist/srp_0.1.0_windows_${ARCH}"
+          $VER = "${{ steps.ver.outputs.version }}"
+          $PKG = "dist/srp_${VER}_windows_${ARCH}"
           New-Item -ItemType Directory -Force -Path "$PKG" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/srp.exe" "$PKG/"
           Copy-Item "target/${{ matrix.target }}/release/srp-helper.exe" "$PKG/"
           Copy-Item "README.md" "$PKG/"
           Copy-Item "LICENSE" "$PKG/"
           Copy-Item "packaging/WINDOWS.md" "$PKG/使用说明.md"
-          Compress-Archive -Path "$PKG/*" -DestinationPath "dist/srp_0.1.0_windows_${ARCH}.zip"
+          Compress-Archive -Path "$PKG/*" -DestinationPath "dist/srp_${VER}_windows_${ARCH}.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: srp-windows-${{ matrix.arch }}
-          path: dist/srp_0.1.0_windows_${{ matrix.arch }}.zip
+          path: dist/srp_${{ steps.ver.outputs.version }}_windows_${{ matrix.arch }}.zip
 
   release:
     runs-on: ubuntu-latest
@@ -186,12 +212,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+      # 用通配符匹配，版本号变动时不需要再改这里。
+      - name: List collected artifacts
+        run: find dist -type f \( -name '*.deb' -o -name '*.zip' \) -printf '%p  %s bytes\n'
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
-            dist/srp-*/srp_0.1.0_amd64.deb
-            dist/srp-*/srp_0.1.0_arm64.deb
-            dist/srp-windows-*/srp_0.1.0_windows_amd64.zip
-            dist/srp-windows-*/srp_0.1.0_windows_arm64.zip
+            dist/srp-*/*.deb
+            dist/srp-windows-*/*.zip

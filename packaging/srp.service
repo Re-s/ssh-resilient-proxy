@@ -7,22 +7,51 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/default/srp
+
 # 注意是 $SRP_ARGS 而不是 ${SRP_ARGS}：
 # systemd 只对不带花括号的形式做空白拆分（并尊重引号），
 # ${...} 会被当作单个参数整体传入。见 man systemd.service "Command lines"。
 ExecStart=/usr/bin/srp $SRP_ARGS
+
 Restart=on-failure
 RestartSec=5
-# 限制单任务 panic 不影响主进程；日志走 journal。
+
+# 日志走 journal，用 journalctl -u srp 查看。
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=srp
+
 # 安全加固。
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=read-only
 PrivateTmp=true
-ReadWritePaths=/etc/default/srp
+
+# ProtectHome 必须是 read-only 而不是 true：
+# srp 需要读 ~/.ssh 下的私钥与 known_hosts，true 会让家目录变成空目录。
+ProtectHome=read-only
 
 [Install]
 WantedBy=multi-user.target
+
+# ── 以非 root 身份运行（推荐） ────────────────────────────────
+#
+# 默认以 root 运行，读的是 /root/.ssh/。如果你的密钥在普通用户家目录下，
+# 与其把私钥复制给 root，不如让服务直接以该用户身份运行：
+#
+#   sudo systemctl edit srp
+#
+# 在打开的编辑器里填入（把 youruser 换成你的用户名）：
+#
+#   [Service]
+#   User=youruser
+#   Group=youruser
+#
+# 保存后执行：
+#
+#   sudo systemctl daemon-reload && sudo systemctl restart srp
+#
+# 这样服务会自动使用该用户的 ~/.ssh/ 私钥与 known_hosts，
+# 无需复制任何私钥。用 systemctl edit 生成的覆盖文件位于
+# /etc/systemd/system/srp.service.d/override.conf，升级 deb 不会覆盖它。
+#
+# 注意：非 root 用户无法绑定 1024 以下的端口。默认的 1080 不受影响。
